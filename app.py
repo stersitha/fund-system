@@ -7,52 +7,94 @@ import os
 # Daily MER rate: 6% / 365
 MER_DAILY_RATE = 0.06 / 365
 
+# Single CSV for all assets
 HISTORY_FILE = "nav_history.csv"
+
+# Asset list (label: code)
+ASSETS = {
+    "SCENQ (TQQQ)": "SCENQ",
+    "SCENB (BITU)": "SCENB",
+    "SCENU (UPRO)": "SCENU",
+    "SCENT (TECL)": "SCENT",
+}
+
+DEFAULT_ASSET_LABEL = "SCENQ (TQQQ)"
+
+# ================== APP TITLE ==================
 
 st.title("Private Fund NAV Engine – Daily NAV & AUM Control")
 
-st.write("""
-This app calculates the daily NAV of your private fund using a logic close to your Excel model:
+st.write(
+    """
+This app calculates the daily NAV of your private funds using the same logic as your Excel model:
 
-- Initial AUM of each day = Final AUM of the previous day
-- Deposits / Withdrawals affect units (mint / burn), not AUM directly
-- Daily MER rate = 6% / 365
-- Servicing Fee is based on:
-  Servicing Fee = (Close Price per Unit × Post Mov Aum) × MER_DAILY_RATE
-- Price per Unit with MER = Close Price per Unit − (Servicing Fee per Unit)
-- Final AUM = Price per Unit with MER × Units
-""")
+- Initial AUM of each day = Final AUM of the previous day  
+- Deposits / Withdrawals only affect units (mint / burn), not AUM directly  
+- Servicing Fee = (Close Price per Unit × Post Mov Aum) × 0.0001644  
+- Price per Unit with MER = Close Price per Unit − (Fee per Unit)  
+- Final AUM = Price per Unit with MER × Units  
+"""
+)
+
+# ------------------ ASSET SELECTION ------------------
+
+st.sidebar.header("Asset selection")
+
+asset_label = st.sidebar.selectbox(
+    "Choose the fund / asset:",
+    list(ASSETS.keys()),
+    index=list(ASSETS.keys()).index(DEFAULT_ASSET_LABEL),
+)
+
+current_asset = ASSETS[asset_label]
+
+st.caption(f"Current asset: **{asset_label}**")
 
 
-# ================== LOAD HISTORY ==================
+# ================== LOAD HISTORY (ALL ASSETS) ==================
 
 if os.path.exists(HISTORY_FILE):
-    history_df = pd.read_csv(HISTORY_FILE, parse_dates=["Date"])
+    full_history_df = pd.read_csv(HISTORY_FILE, parse_dates=["Date"])
+    # Backward compatibility: old file without Asset column = assume SCENQ
+    if "Asset" not in full_history_df.columns:
+        full_history_df["Asset"] = "SCENQ"
+else:
+    full_history_df = pd.DataFrame()
+
+# History only for the selected asset
+if not full_history_df.empty:
+    history_df = full_history_df[full_history_df["Asset"] == current_asset].copy()
     history_df = history_df.sort_values("Date")
 else:
     history_df = pd.DataFrame()
 
 
-# ================== INITIAL SETUP ==================
+# ================== INITIAL SETUP (PER ASSET) ==================
 
 if history_df.empty:
-    st.subheader("Initial Setup – First NAV Day")
+    st.subheader(f"Initial Setup – First NAV Day for {asset_label}")
 
-    st.write("""
-This is the technical first line of your NAV history.
+    st.write(
+        """
+This is the **technical first line** of the NAV history for this asset.
 
-It should represent the fund right after the first deposit, before any fee or performance.
+It should represent the fund **right after the first deposit**, before any fee or performance.
+
 Usually:
-
 - Date = first NAV date
 - Initial AUM = first AUM value
 - Initial Units = same value (so initial price per unit = 1.00000)
-""")
+"""
+    )
 
     with st.form("initial_setup"):
         init_date = st.date_input("Initial NAV Date")
-        init_aum = st.number_input("Initial AUM", min_value=0.0, value=10733.50, step=100.0)
-        init_units = st.number_input("Initial Units", min_value=0.000001, value=10733.50, step=100.0)
+        init_aum = st.number_input(
+            "Initial AUM", min_value=0.0, value=10733.50, step=100.0
+        )
+        init_units = st.number_input(
+            "Initial Units", min_value=0.000001, value=10733.50, step=100.0
+        )
 
         submitted = st.form_submit_button("Create Initial NAV")
 
@@ -60,6 +102,7 @@ Usually:
             initial_ppu = init_aum / init_units
 
             data = {
+                "Asset": [current_asset],
                 "Date": [pd.to_datetime(init_date)],
                 "Initial AUM": [init_aum],
                 "Deposits": [0.0],
@@ -87,25 +130,37 @@ Usually:
                 "PPU_MER_Change_%": [0.0],
             }
 
-            history_df = pd.DataFrame(data)
-            history_df.to_csv(HISTORY_FILE, index=False)
-            st.success("Initial NAV created and saved to nav_history.csv. Please reload the app.")
+            new_asset_df = pd.DataFrame(data)
+
+            if full_history_df.empty:
+                full_history_df = new_asset_df
+            else:
+                # Remove any existing rows for this asset (if user is resetting)
+                other_df = full_history_df[full_history_df["Asset"] != current_asset]
+                full_history_df = pd.concat(
+                    [other_df, new_asset_df], ignore_index=True
+                )
+
+            full_history_df.to_csv(HISTORY_FILE, index=False)
+            st.success(
+                f"Initial NAV for {asset_label} created and saved to {HISTORY_FILE}. Reload the app."
+            )
             st.stop()
 
 else:
-    st.subheader("Current NAV History (Latest 10 days)")
+    st.subheader(f"Current NAV History for {asset_label} (Latest 10 days)")
     st.dataframe(history_df.tail(10))
 
 
 # ================== DAILY NAV INPUT FORM ==================
 
-st.subheader("New Daily NAV – Inputs")
+st.subheader(f"New Daily NAV – Inputs for {asset_label}")
 
 if not history_df.empty:
     last_row = history_df.sort_values("Date").iloc[-1]
     st.markdown(
         f"""
-**Last NAV Day:**
+**Last NAV Day for {asset_label}:**
 
 - Date: `{last_row['Date'].date()}`
 - Final AUM: `{last_row['Final AUM']:.2f}`
@@ -117,10 +172,16 @@ if not history_df.empty:
 with st.form("daily_nav"):
     nav_date = st.date_input("NAV Date (today)")
     deposits = st.number_input("Deposits", min_value=0.0, value=0.0, step=1000.0)
-    withdrawals = st.number_input("Withdrawals", min_value=0.0, value=0.0, step=1000.0)
+    withdrawals = st.number_input(
+        "Withdrawals", min_value=0.0, value=0.0, step=1000.0
+    )
 
-    unrealized_perf_d = st.number_input("Unrealized Performance $", value=0.0, step=1000.0)
-    realized_perf_d = st.number_input("Realized Performance $", value=0.0, step=1000.0)
+    unrealized_perf_d = st.number_input(
+        "Unrealized Performance $", value=0.0, step=1000.0
+    )
+    realized_perf_d = st.number_input(
+        "Realized Performance $", value=0.0, step=1000.0
+    )
     trading_costs = st.number_input("Trading Costs", value=0.0, step=100.0)
 
     submitted_daily = st.form_submit_button("Calculate and Save NAV")
@@ -130,13 +191,16 @@ with st.form("daily_nav"):
 
 if submitted_daily:
     if history_df.empty:
-        st.error("No history found. Please create the initial NAV first.")
+        st.error(
+            "No history found for this asset. Please create the initial NAV first."
+        )
         st.stop()
 
+    # Work only with this asset's history
     history_df = history_df.sort_values("Date")
     last_row = history_df.iloc[-1]
 
-    # Initial values from previous day
+    # ----- INITIAL VALUES FROM PREVIOUS DAY -----
     initial_aum = last_row["Final AUM"]
     initial_units = last_row["Units"]
 
@@ -144,9 +208,10 @@ if submitted_daily:
         st.error("Previous Units is zero. Cannot compute price per unit.")
         st.stop()
 
+    # Initial price per unit = previous day's Price per Unit with MER
     initial_ppu = last_row["Price per Unit with MER"]
 
-    # Flows (mint / burn)
+    # ----- FLOWS (MINT / BURN) -----
     net_flow = deposits - withdrawals
 
     units_to_mint = deposits / initial_ppu if deposits > 0 else 0.0
@@ -161,32 +226,31 @@ if submitted_daily:
     # Post Mov Aum = Initial AUM +/- flows
     post_mov_aum = initial_aum + net_flow
 
-    # Gross AUM before MER
+    # ----- GROSS AUM BEFORE MER -----
     gross_aum = (
-        initial_aum
-        + unrealized_perf_d
-        + realized_perf_d
-        - trading_costs
+        initial_aum + unrealized_perf_d + realized_perf_d - trading_costs
     )
 
     # Close Price per Unit (before MER)
     close_ppu = gross_aum / units_end
 
-    # Servicing Fee
+    # Servicing Fee = (Close Price per Unit * Post Mov Aum) * daily MER rate
     servicing_fee = (close_ppu * post_mov_aum) * MER_DAILY_RATE
 
     # Fee per unit and Price per Unit with MER
     fee_per_unit = servicing_fee / units_end
     price_with_mer = close_ppu - fee_per_unit
 
-    # Final AUM
+    # Final AUM = Price per Unit with MER * Units
     final_aum = price_with_mer * units_end
 
-    # Performance percentages
+    # ----- PERFORMANCE PERCENTAGES -----
     if post_mov_aum != 0:
         unrealized_perf_pct = (unrealized_perf_d / post_mov_aum) * 100.0
         realized_perf_pct = (realized_perf_d / post_mov_aum) * 100.0
-        total_perf_pct = ((unrealized_perf_d + realized_perf_d) / post_mov_aum) * 100.0
+        total_perf_pct = (
+            (unrealized_perf_d + realized_perf_d) / post_mov_aum
+        ) * 100.0
     else:
         unrealized_perf_pct = 0.0
         realized_perf_pct = 0.0
@@ -194,7 +258,9 @@ if submitted_daily:
 
     # AUM change vs "Initial AUM" of the day
     aum_change = final_aum - initial_aum
-    aum_change_pct = (aum_change / initial_aum * 100.0) if initial_aum != 0 else 0.0
+    aum_change_pct = (
+        (aum_change / initial_aum * 100.0) if initial_aum != 0 else 0.0
+    )
 
     # PPU changes
     ppu_change = price_with_mer - initial_ppu
@@ -207,8 +273,9 @@ if submitted_daily:
         else 0.0
     )
 
-    # Build new row
+    # ----- BUILD NEW ROW -----
     new_row = {
+        "Asset": current_asset,
         "Date": pd.to_datetime(nav_date),
         "Initial AUM": initial_aum,
         "Deposits": deposits,
@@ -236,19 +303,35 @@ if submitted_daily:
         "PPU_MER_Change_%": ppu_mer_change_pct,
     }
 
-    history_df = pd.concat([history_df, pd.DataFrame([new_row])], ignore_index=True)
-    history_df = history_df.sort_values("Date")
-    history_df.to_csv(HISTORY_FILE, index=False)
+    # Update history for this asset only
+    asset_df = pd.concat(
+        [history_df, pd.DataFrame([new_row])], ignore_index=True
+    ).sort_values("Date")
 
-    st.success("Daily NAV calculated and saved to nav_history.csv.")
+    if full_history_df.empty:
+        full_history_df = asset_df
+    else:
+        other_df = full_history_df[full_history_df["Asset"] != current_asset]
+        full_history_df = pd.concat(
+            [other_df, asset_df], ignore_index=True
+        )
+
+    full_history_df.to_csv(HISTORY_FILE, index=False)
+
+    st.success(f"Daily NAV for {asset_label} calculated and saved.")
+
+    # Update history_df for the dashboard below
+    history_df = asset_df
 
 
 # ================== DASHBOARD + MANUAL EDIT ==================
 
 if history_df.empty:
-    st.info("No NAV history yet. Create the initial NAV first.")
+    st.info(
+        f"No NAV history yet for {asset_label}. Create the initial NAV first."
+    )
 else:
-    st.subheader("Full NAV History")
+    st.subheader(f"Full NAV History for {asset_label}")
     history_sorted = history_df.sort_values("Date")
     st.dataframe(history_sorted)
 
@@ -270,24 +353,29 @@ else:
         st.subheader("Total Performance % Over Time")
         st.line_chart(df_chart["Total Performance %"])
 
-    st.subheader("Manual NAV Corrections (Edit Mistakes)")
+    # --- Manual Corrections ---
+    st.subheader(
+        f"Manual NAV Corrections for {asset_label} (Edit Mistakes Only for This Asset)"
+    )
 
-    st.write("""
+    st.write(
+        """
 You can use this table to fix mistakes such as:
-- wrong dates (e.g. duplicated 2025-10-26)
-- wrong performance values
-- rows that should not exist
+- wrong dates  
+- wrong performance values  
+- rows that should not exist  
 
-How to use:
-- Click on a cell to edit its value (including the Date).
-- Use the trash icon on the left to delete a row.
-- When finished, click Save edited history below.
-""")
+**How to use:**
+- Click on a cell to edit its value (including the Date).  
+- Use the trash icon on the left to delete a row.  
+- When finished, click **Save edited history** below.
+"""
+    )
 
     edited_df = st.data_editor(
         history_sorted,
         num_rows="dynamic",
-        key="nav_editor"
+        key=f"nav_editor_{current_asset}",
     )
 
     if st.button("Save edited history"):
@@ -295,10 +383,21 @@ How to use:
             edited_df["Date"] = pd.to_datetime(edited_df["Date"])
         except Exception:
             st.error("Could not parse Date column. Please use format YYYY-MM-DD.")
-            st.stop()
+        else:
+            # Make sure Asset column is correct
+            edited_df["Asset"] = current_asset
 
-        edited_df = edited_df.sort_values("Date")
-        edited_df.to_csv(HISTORY_FILE, index=False)
+            if full_history_df.empty:
+                full_history_df = edited_df
+            else:
+                other_df = full_history_df[
+                    full_history_df["Asset"] != current_asset
+                ]
+                full_history_df = pd.concat(
+                    [other_df, edited_df], ignore_index=True
+                )
 
-        st.success("Edited NAV history saved. Reload the page to see the updated table.")
-
+            full_history_df.to_csv(HISTORY_FILE, index=False)
+            st.success(
+                f"Edited NAV history for {asset_label} saved. Reload the page to see the updated table."
+            )
