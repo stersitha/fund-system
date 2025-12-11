@@ -30,18 +30,17 @@ history_file = ASSET_FILES[selected_asset]
 st.title("Private Fund NAV Engine – Daily NAV & AUM Control")
 st.caption(f"Current asset: **{selected_asset}**")
 
-st.write(
-    """
-This app calculates the daily NAV of your private fund using the same logic as your Excel model:
+st.write("""
+This app calculates the daily NAV of your private fund using a logic close to your Excel model:
 
-- Initial AUM of each day = Final AUM of the previous day  
-- Deposits / Withdrawals affect units (mint / burn), not AUM directly  
-- Daily MER rate = 6% / 365  
-- Servicing Fee = (Close Price per Unit × Post Mov Aum) × MER_DAILY_RATE  
-- Price per Unit with MER = Close Price per Unit − (Servicing Fee per Unit)  
-- Final AUM = Price per Unit with MER × Units  
-"""
-)
+- Initial AUM of each day = Final AUM of the previous day
+- Deposits / Withdrawals affect units (mint / burn), not AUM directly
+- Daily MER rate = 6% / 365
+- Servicing Fee is based on:
+  Servicing Fee = (Close Price per Unit × Post Mov Aum) × MER_DAILY_RATE
+- Price per Unit with MER = Close Price per Unit − (Servicing Fee per Unit)
+- Final AUM = Price per Unit with MER × Units
+""")
 
 # ================== LOAD HISTORY FOR SELECTED ASSET ==================
 
