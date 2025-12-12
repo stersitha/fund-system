@@ -192,6 +192,8 @@ with st.form("daily_nav"):
 
 # ================== DAILY NAV CALCULATION ==================
 
+# ================== DAILY NAV CALCULATION ==================
+
 if submitted_daily:
     history_df = history_df.sort_values("Date")
     last_row = history_df.iloc[-1]
