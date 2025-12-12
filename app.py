@@ -4,8 +4,14 @@ import os
 
 # ================== CONFIG ==================
 
-MER_DAILY_RATE = 0.06 / 365  # 6% / 365
-FUNDS = ["SCENQ (TQQQ)", "SCENB (BITU)", "SCENU (UPRO)", "SCENT (TECL)"]
+MER_DAILY_RATE = 0.06 / 365
+
+FUNDS = [
+    "SCENQ (TQQQ)",
+    "SCENB (BITU)",
+    "SCENU (UPRO)",
+    "SCENT (TECL)",
+]
 
 fund_map = {
     "SCENQ (TQQQ)": "nav_history_SCENQ.csv",
@@ -187,65 +193,40 @@ with st.form("daily_nav"):
 # ================== DAILY NAV CALCULATION ==================
 
 if submitted_daily:
-    history_df = history_df.sort_values("Date").reset_index(drop=True)
+    history_df = history_df.sort_values("Date")
     last_row = history_df.iloc[-1]
 
-    initial_aum = float(last_row["Final AUM"])
-    initial_units = float(last_row["Units"])
-    initial_ppu = float(last_row["Price per Unit with MER"])
+    # 1️⃣ Initial state
+    initial_aum = last_row["Final AUM"]
+    units_start = last_row["Units"]
+    initial_ppu = last_row["Price per Unit with MER"]
 
-    net_flow = deposits - withdrawals
-
+    # 2️⃣ Flows → units only
     units_to_mint = deposits / initial_ppu if deposits > 0 else 0.0
     units_to_burn = withdrawals / initial_ppu if withdrawals > 0 else 0.0
-    net_units = units_to_mint - units_to_burn
-    units_end = initial_units + net_units
+    units_end = units_start + units_to_mint - units_to_burn
 
-    if units_end <= 0:
-        st.error("Ending Units is zero or negative. Cannot compute NAV.")
-        st.stop()
+    # 3️⃣ Post-movement AUM (fee base)
+    post_mov_aum = initial_aum + deposits - withdrawals
 
-    post_mov_aum = initial_aum + net_flow
+    # 4️⃣ Gross AUM (performance)
+    gross_aum = (
+        initial_aum
+        + unrealized_perf_d
+        + realized_perf_d
+        - trading_costs
+    )
 
-    gross_aum = initial_aum + unrealized_perf_d + realized_perf_d - trading_costs
+    # 5️⃣ Close price before fee
     close_ppu = gross_aum / units_end
 
-    servicing_fee = (close_ppu * post_mov_aum) * MER_DAILY_RATE
+    # 6️⃣ Servicing fee (EXACT Excel logic)
+    servicing_fee = close_ppu * post_mov_aum * MER_DAILY_RATE
     fee_per_unit = servicing_fee / units_end
+
+    # 7️⃣ Final price & AUM
     price_with_mer = close_ppu - fee_per_unit
-
     final_aum = price_with_mer * units_end
-    ppu_change = price_with_mer - initial_ppu
-
-    unrealized_perf_pct = (unrealized_perf_d / post_mov_aum) * 100.0 if post_mov_aum != 0 else 0.0
-    realized_perf_pct = (realized_perf_d / post_mov_aum) * 100.0 if post_mov_aum != 0 else 0.0
-
-    new_row = {
-        "Date": pd.to_datetime(nav_date),
-        "Deposits": deposits,
-        "Withdrawals": withdrawals,
-        "Initial AUM": initial_aum,
-        "Units to Mint": units_to_mint,
-        "Units to Burn": units_to_burn,
-        "Net Units": net_units,
-        "Units": units_end,
-        "Post Mov Aum": post_mov_aum,
-        "Unrealized Performance $": unrealized_perf_d,
-        "Unrealized Performance %": unrealized_perf_pct,
-        "Realized Performance $": realized_perf_d,
-        "Realized Performance %": realized_perf_pct,
-        "Initial Price per Unit": initial_ppu,
-        "Close Price per Unit": close_ppu,
-        "Servicing Fee": servicing_fee,
-        "Trading Costs": trading_costs,
-        "Price per Unit with MER": price_with_mer,
-        "PPU Change": ppu_change,
-        "Final AUM": final_aum,
-    }
-
-    history_df = pd.concat([history_df, pd.DataFrame([new_row])], ignore_index=True)
-    save_history(history_df)
-    st.success(f"Daily NAV saved for {fund_choice}.")
 
 # ================== MANUAL EDIT ==================
 
