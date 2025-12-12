@@ -1,356 +1,314 @@
-import streamlit as st
-import pandas as pd
-import os
-from datetime import timedelta
-
 # ================== CONFIG ==================
 
 # Daily MER rate: 6% / 365
 MER_DAILY_RATE = 0.06 / 365
 
-ASSETS = {
-    "SCENQ (TQQQ)": "SCENQ",
-    "SCENB (BITU)": "SCENB",
-    "SCENU (UPRO)": "SCENU",
-    "SCENT (TECL)": "SCENT",
-}
-
-st.set_page_config(page_title="Private Fund NAV Engine", layout="wide")
+HISTORY_FILE = "nav_history.csv"
 
 st.title("Private Fund NAV Engine – Daily NAV & AUM Control")
-
-# ================== ASSET SELECTION ==================
-
-asset_label = st.selectbox("Select Asset", list(ASSETS.keys()))
-asset_code = ASSETS[asset_label]
-
-HISTORY_FILE = f"nav_history_{asset_code}.csv"
-
-st.caption(f"Current asset file: `{HISTORY_FILE}`")
-
-st.write(
-    """
-This app follows your Excel-style daily NAV logic:
-
-- Initial AUM (day t) = Final AUM (day t-1)
-- Deposits / Withdrawals only affect units (mint / burn), not AUM directly
-- Daily MER rate = 6% / 365
-- Servicing Fee = (Close Price per Unit × Post Mov Aum) × MER_DAILY_RATE
-- Price per Unit with MER = Close Price per Unit − (Servicing Fee per Unit)
-- Final AUM = Price per Unit with MER × Units
-"""
+fund_choice = st.selectbox(
+    "Select the fund:",
+    ["SCENQ (TQQQ)", "SCENB (BITU)", "SCENU (UPRO)", "SCENT (TECL)"]
 )
 
-# ================== HELPERS ==================
+# Map display name → filename
+fund_map = {
+    "SCENQ (TQQQ)": "nav_history_SCENQ.csv",
+    "SCENB (BITU)": "nav_history_SCENB.csv",
+    "SCENU (UPRO)": "nav_history_SCENU.csv",
+    "SCENT (TECL)": "nav_history_SCENT.csv",
+}
 
-EXPECTED_COLS = [
-    "Date",
-    "Deposits",
-    "Withdrawals",
-    "Initial AUM",
-    "Units to Mint",
-    "Units to Burn",
-    "Net Units",
-    "Units",
-    "Post Mov Aum",
-    "Unrealized Performance $",
-    "Unrealized Performance %",
-    "Realized Performance $",
-    "Realized Performance %",
-    "Initial Price per Unit",
-    "Close Price per Unit",
-    "Servicing Fee",
-    "Trading Costs",
-    "Price per Unit with MER",
-    "PPU Change",
-    "Final AUM",
-]
+HISTORY_FILE = fund_map[fund_choice]
 
-def safe_float(x, default=0.0):
-    try:
-        if pd.isna(x):
-            return default
-        return float(x)
-    except Exception:
-        return default
+st.write("""
+This app calculates the daily NAV of your private fund using a logic close to your Excel model:
 
-def load_history():
-    if os.path.exists(HISTORY_FILE):
-        df = pd.read_csv(HISTORY_FILE)
-        if "Date" in df.columns:
-            df["Date"] = pd.to_datetime(df["Date"])
-        df = df.sort_values("Date")
-        return df
-    return pd.DataFrame(columns=EXPECTED_COLS)
+- Initial AUM of each day = Final AUM of the previous day
+- Deposits / Withdrawals affect units (mint / burn), not AUM directly
+- Daily MER rate = 6% / 365
+- Servicing Fee is based on:
+  Servicing Fee = (Close Price per Unit × Post Mov Aum) × MER_DAILY_RATE
+- Price per Unit with MER = Close Price per Unit − (Servicing Fee per Unit)
+- Final AUM = Price per Unit with MER × Units
+""")
 
-def save_history(df):
-    df = df.copy()
-    df["Date"] = pd.to_datetime(df["Date"])
-    df = df.sort_values("Date")
-    df.to_csv(HISTORY_FILE, index=False)
-
-def delete_history_file():
-    if os.path.exists(HISTORY_FILE):
-        os.remove(HISTORY_FILE)
 
 # ================== LOAD HISTORY ==================
 
-history_df = load_history()
+if os.path.exists(HISTORY_FILE):
+    history_df = pd.read_csv(HISTORY_FILE, parse_dates=["Date"])
+    history_df = history_df.sort_values("Date")
+else:
+    history_df = pd.DataFrame()
 
-# ================== RESET (per asset) ==================
 
-with st.expander("Admin / Reset (this asset only)", expanded=False):
-    st.warning("This will delete ALL NAV history for the selected asset.")
-    if st.button("Delete all history for this asset"):
-        delete_history_file()
-        st.success("History deleted. Refresh the page.")
-        st.stop()
-
-# ================== DAY 1 (FIRST NAV DAY) ==================
+# ================== INITIAL SETUP ==================
 
 if history_df.empty:
-    st.subheader("Day 1 – First NAV Day (Excel baseline)")
+    st.subheader("Initial Setup – First NAV Day")
 
-    st.write(
-        """
-Aqui é onde você faz a **primeira linha do seu Excel**, mas já fechando o dia com fee.
+    st.write("""
+This is the technical first line of your NAV history.
 
-Para bater com o seu Excel do 10/21:
-- Initial AUM = 10,733.50
-- Units = 10,733.50
-- Close Price per Unit = 1.00000
-- Deposits/Withdrawals = 0 (porque a base já está “dentro” do AUM/Units)
-- Unrealized/Realized/Trading = 0 (se for o caso)
-"""
-    )
+It should represent the fund right after the first deposit, before any fee or performance.
+Usually:
 
-    with st.form("first_day_form"):
-        day1_date = st.date_input("Date (Day 1)")
-        day1_initial_aum = st.number_input("Initial AUM", min_value=0.0, value=10733.50, step=1.0)
-        day1_units = st.number_input("Units", min_value=0.000001, value=10733.50, step=1.0)
-        day1_close_ppu = st.number_input("Close Price per Unit (before MER)", min_value=0.000001, value=1.0, step=0.00001)
+- Date = first NAV date
+- Initial AUM = first AUM value
+- Initial Units = same value (so initial price per unit = 1.00000)
+""")
 
-        day1_trading_costs = st.number_input("Trading Costs", value=0.0, step=1.0)
-        day1_unreal = st.number_input("Unrealized Performance $", value=0.0, step=1.0)
-        day1_realized = st.number_input("Realized Performance $", value=0.0, step=1.0)
+    with st.form("initial_setup"):
+        init_date = st.date_input("Initial NAV Date")
+        init_aum = st.number_input("Initial AUM", min_value=0.0, value=10733.50, step=100.0)
+        init_units = st.number_input("Initial Units", min_value=0.000001, value=10733.50, step=100.0)
 
-        submitted_day1 = st.form_submit_button("Create Day 1 (with fee)")
+        submitted = st.form_submit_button("Create Initial NAV")
 
-    if submitted_day1:
-        # No flows in Day 1 baseline (to match your Excel style)
-        deposits = 0.0
-        withdrawals = 0.0
+        if submitted:
+            initial_ppu = init_aum / init_units
 
-        initial_aum = day1_initial_aum
-        units_end = day1_units
+            data = {
+                "Date": [pd.to_datetime(init_date)],
+                "Initial AUM": [init_aum],
+                "Deposits": [0.0],
+                "Withdrawals": [0.0],
+                "Units to Mint": [0.0],
+                "Units to Burn": [0.0],
+                "Net Units": [0.0],
+                "Units": [init_units],
+                "Post Mov Aum": [init_aum],
+                "Unrealized Performance $": [0.0],
+                "Unrealized Performance %": [0.0],
+                "Realized Performance $": [0.0],
+                "Realized Performance %": [0.0],
+                "Initial Price per Unit": [initial_ppu],
+                "Close Price per Unit": [initial_ppu],
+                "Servicing Fee": [0.0],
+                "Trading Costs": [0.0],
+                "Price per Unit with MER": [initial_ppu],
+                "PPU Change": [0.0],
+                "Final AUM": [init_aum],
+                "Total Performance %": [0.0],
+                "AUM_Change": [0.0],
+                "AUM_Change_%": [0.0],
+                "PPU_MER_Change": [0.0],
+                "PPU_MER_Change_%": [0.0],
+            }
 
-        if units_end <= 0:
-            st.error("Units must be > 0.")
+            history_df = pd.DataFrame(data)
+            history_df.to_csv(HISTORY_FILE, index=False)
+            st.success("Initial NAV created and saved to nav_history.csv. Please reload the app.")
             st.stop()
 
-        initial_ppu = initial_aum / units_end  # usually 1.0
-        post_mov_aum = initial_aum  # no flows baseline
+else:
+    st.subheader("Current NAV History (Latest 10 days)")
+    st.dataframe(history_df.tail(10))
 
-        # Gross AUM before MER (your model adds perf/costs inside the day)
-        gross_aum = initial_aum + day1_unreal + day1_realized - day1_trading_costs
 
-        # Close PPU (before MER) can be forced to match Excel baseline
-        close_ppu = day1_close_ppu
-
-        # Fee
-        servicing_fee = (close_ppu * post_mov_aum) * MER_DAILY_RATE
-        fee_per_unit = servicing_fee / units_end
-
-        price_with_mer = close_ppu - fee_per_unit
-        final_aum = price_with_mer * units_end
-
-        # Percentages
-        unreal_pct = (day1_unreal / post_mov_aum) * 100.0 if post_mov_aum != 0 else 0.0
-        realized_pct = (day1_realized / post_mov_aum) * 100.0 if post_mov_aum != 0 else 0.0
-
-        new_row = {
-            "Date": pd.to_datetime(day1_date),
-            "Deposits": deposits,
-            "Withdrawals": withdrawals,
-            "Initial AUM": initial_aum,
-            "Units to Mint": 0.0,
-            "Units to Burn": 0.0,
-            "Net Units": 0.0,
-            "Units": units_end,
-            "Post Mov Aum": post_mov_aum,
-            "Unrealized Performance $": day1_unreal,
-            "Unrealized Performance %": unreal_pct,
-            "Realized Performance $": day1_realized,
-            "Realized Performance %": realized_pct,
-            "Initial Price per Unit": initial_ppu,
-            "Close Price per Unit": close_ppu,
-            "Servicing Fee": servicing_fee,
-            "Trading Costs": day1_trading_costs,
-            "Price per Unit with MER": price_with_mer,
-            "PPU Change": price_with_mer - initial_ppu,
-            "Final AUM": final_aum,
-        }
-
-        history_df = pd.DataFrame([new_row], columns=EXPECTED_COLS)
-        save_history(history_df)
-
-        st.success("Day 1 created. Now you can add Day 2 and onward.")
-        st.stop()
-
-# ================== SHOW HISTORY ==================
-
-st.subheader("NAV History (latest 10 rows)")
-history_df = load_history()
-st.dataframe(history_df.tail(10), use_container_width=True)
-
-# ================== NEW DAILY NAV ==================
+# ================== DAILY NAV INPUT FORM ==================
 
 st.subheader("New Daily NAV – Inputs")
 
-history_df = history_df.sort_values("Date")
-last_row = history_df.iloc[-1]
-last_date = pd.to_datetime(last_row["Date"]).date()
+if not history_df.empty:
+    last_row = history_df.sort_values("Date").iloc[-1]
+    st.markdown(
+        f"""
+**Last NAV Day:**
 
-# Default next date = last_date + 1 day (prevents duplicates)
-default_next_date = last_date + timedelta(days=1)
-
-st.markdown(
-    f"""
-**Last NAV Day**
-- Date: `{last_date}`
-- Final AUM: `{safe_float(last_row['Final AUM']):,.2f}`
-- Units: `{safe_float(last_row['Units']):,.6f}`
-- Price per Unit with MER: `{safe_float(last_row['Price per Unit with MER']):,.6f}`
+- Date: `{last_row['Date'].date()}`
+- Final AUM: `{last_row['Final AUM']:.2f}`
+- Units: `{last_row['Units']:.6f}`
+- Price per Unit with MER: `{last_row['Price per Unit with MER']:.6f}`
 """
-)
+    )
 
-with st.form("daily_nav_form"):
-    nav_date = st.date_input("NAV Date", value=default_next_date)
+with st.form("daily_nav"):
+    nav_date = st.date_input("NAV Date (today)")
+    deposits = st.number_input("Deposits", min_value=0.0, value=0.0, step=1000.0)
+    withdrawals = st.number_input("Withdrawals", min_value=0.0, value=0.0, step=1000.0)
 
-    deposits = st.number_input("Deposits", min_value=0.0, value=0.0, step=100.0)
-    withdrawals = st.number_input("Withdrawals", min_value=0.0, value=0.0, step=100.0)
-
-    unrealized_perf_d = st.number_input("Unrealized Performance $", value=0.0, step=100.0)
-    realized_perf_d = st.number_input("Realized Performance $", value=0.0, step=100.0)
-    trading_costs = st.number_input("Trading Costs", value=0.0, step=10.0)
+    unrealized_perf_d = st.number_input("Unrealized Performance $", value=0.0, step=1000.0)
+    realized_perf_d = st.number_input("Realized Performance $", value=0.0, step=1000.0)
+    trading_costs = st.number_input("Trading Costs", value=0.0, step=100.0)
 
     submitted_daily = st.form_submit_button("Calculate and Save NAV")
 
+
+# ================== DAILY NAV CALCULATION ==================
+
 if submitted_daily:
-    # Prevent duplicate dates
-    nav_dt = pd.to_datetime(nav_date)
-    if (history_df["Date"].dt.date == nav_dt.date()).any():
-        st.error("This date already exists in history. Please choose the next day.")
+    if history_df.empty:
+        st.error("No history found. Please create the initial NAV first.")
         st.stop()
 
-    initial_aum = safe_float(last_row["Final AUM"])
-    initial_units = safe_float(last_row["Units"])
-    initial_ppu = safe_float(last_row["Price per Unit with MER"])
+    history_df = history_df.sort_values("Date")
+    last_row = history_df.iloc[-1]
 
-    if initial_units <= 0:
-        st.error("Previous Units is zero. Cannot compute NAV.")
+    # Initial values from previous day
+    initial_aum = last_row["Final AUM"]
+    initial_units = last_row["Units"]
+
+    if initial_units == 0:
+        st.error("Previous Units is zero. Cannot compute price per unit.")
         st.stop()
 
-    # Flows only affect units
+    initial_ppu = last_row["Price per Unit with MER"]
+
+    # Flows (mint / burn)
+    net_flow = deposits - withdrawals
+
     units_to_mint = deposits / initial_ppu if deposits > 0 else 0.0
     units_to_burn = withdrawals / initial_ppu if withdrawals > 0 else 0.0
     net_units = units_to_mint - units_to_burn
     units_end = initial_units + net_units
 
     if units_end <= 0:
-        st.error("Ending Units is zero or negative.")
+        st.error("Ending Units is zero or negative. Cannot compute NAV.")
         st.stop()
 
-    post_mov_aum = initial_aum + deposits - withdrawals
+    # Post Mov Aum = Initial AUM +/- flows
+    post_mov_aum = initial_aum + net_flow
 
     # Gross AUM before MER
-    gross_aum = initial_aum + unrealized_perf_d + realized_perf_d - trading_costs
+    gross_aum = (
+        initial_aum
+        + unrealized_perf_d
+        + realized_perf_d
+        - trading_costs
+    )
 
-    # Close price per unit (before MER)
+    # Close Price per Unit (before MER)
     close_ppu = gross_aum / units_end
 
-    # Fee
+    # Servicing Fee
     servicing_fee = (close_ppu * post_mov_aum) * MER_DAILY_RATE
-    fee_per_unit = servicing_fee / units_end
 
-    # PPU with MER (Excel-style)
+    # Fee per unit and Price per Unit with MER
+    fee_per_unit = servicing_fee / units_end
     price_with_mer = close_ppu - fee_per_unit
 
     # Final AUM
     final_aum = price_with_mer * units_end
 
-    unreal_pct = (unrealized_perf_d / post_mov_aum) * 100.0 if post_mov_aum != 0 else 0.0
-    realized_pct = (realized_perf_d / post_mov_aum) * 100.0 if post_mov_aum != 0 else 0.0
+    # Performance percentages
+    if post_mov_aum != 0:
+        unrealized_perf_pct = (unrealized_perf_d / post_mov_aum) * 100.0
+        realized_perf_pct = (realized_perf_d / post_mov_aum) * 100.0
+        total_perf_pct = ((unrealized_perf_d + realized_perf_d) / post_mov_aum) * 100.0
+    else:
+        unrealized_perf_pct = 0.0
+        realized_perf_pct = 0.0
+        total_perf_pct = 0.0
 
+    # AUM change vs "Initial AUM" of the day
+    aum_change = final_aum - initial_aum
+    aum_change_pct = (aum_change / initial_aum * 100.0) if initial_aum != 0 else 0.0
+
+    # PPU changes
+    ppu_change = price_with_mer - initial_ppu
+
+    prev_close_ppu = initial_ppu
+    ppu_mer_change = price_with_mer - prev_close_ppu
+    ppu_mer_change_pct = (
+        (ppu_mer_change / prev_close_ppu * 100.0)
+        if prev_close_ppu != 0
+        else 0.0
+    )
+
+    # Build new row
     new_row = {
-        "Date": nav_dt,
+        "Date": pd.to_datetime(nav_date),
+        "Initial AUM": initial_aum,
         "Deposits": deposits,
         "Withdrawals": withdrawals,
-        "Initial AUM": initial_aum,
         "Units to Mint": units_to_mint,
         "Units to Burn": units_to_burn,
         "Net Units": net_units,
         "Units": units_end,
         "Post Mov Aum": post_mov_aum,
         "Unrealized Performance $": unrealized_perf_d,
-        "Unrealized Performance %": unreal_pct,
+        "Unrealized Performance %": unrealized_perf_pct,
         "Realized Performance $": realized_perf_d,
-        "Realized Performance %": realized_pct,
+        "Realized Performance %": realized_perf_pct,
         "Initial Price per Unit": initial_ppu,
         "Close Price per Unit": close_ppu,
         "Servicing Fee": servicing_fee,
         "Trading Costs": trading_costs,
         "Price per Unit with MER": price_with_mer,
-        "PPU Change": price_with_mer - initial_ppu,
+        "PPU Change": ppu_change,
         "Final AUM": final_aum,
+        "Total Performance %": total_perf_pct,
+        "AUM_Change": aum_change,
+        "AUM_Change_%": aum_change_pct,
+        "PPU_MER_Change": ppu_mer_change,
+        "PPU_MER_Change_%": ppu_mer_change_pct,
     }
 
     history_df = pd.concat([history_df, pd.DataFrame([new_row])], ignore_index=True)
-    history_df = history_df[EXPECTED_COLS]
-    save_history(history_df)
+    history_df = history_df.sort_values("Date")
+    history_df.to_csv(HISTORY_FILE, index=False)
 
-    st.success("Daily NAV saved.")
-    st.rerun()
+    st.success("Daily NAV calculated and saved to nav_history.csv.")
 
-# ================== MANUAL CORRECTIONS ==================
 
-st.subheader("Manual NAV Corrections (Edit Mistakes)")
+# ================== DASHBOARD + MANUAL EDIT ==================
 
-st.write(
-    """
-Aqui você pode corrigir:
-- datas duplicadas
-- realized/unrealized
-- trading costs
-- **servicing fee**
-- qualquer valor que você precise ajustar pra bater com o Excel
+if history_df.empty:
+    st.info("No NAV history yet. Create the initial NAV first.")
+else:
+    st.subheader("Full NAV History")
+    history_sorted = history_df.sort_values("Date")
+    st.dataframe(history_sorted)
 
-Depois clique em **Save edited history**.
-"""
-)
+    df_chart = history_sorted.set_index("Date")
 
-history_df = load_history().sort_values("Date")
-edited_df = st.data_editor(
-    history_df,
-    num_rows="dynamic",
-    use_container_width=True,
-    key=f"editor_{asset_code}",
-)
+    if "Price per Unit with MER" in df_chart.columns:
+        st.subheader("Price per Unit with MER Over Time")
+        st.line_chart(df_chart["Price per Unit with MER"])
 
-if st.button("Save edited history"):
-    try:
-        edited_df["Date"] = pd.to_datetime(edited_df["Date"])
-    except Exception:
-        st.error("Could not parse Date column. Use YYYY-MM-DD format.")
-        st.stop()
+    if "Final AUM" in df_chart.columns:
+        st.subheader("Final AUM Over Time")
+        st.line_chart(df_chart["Final AUM"])
 
-    # Ensure columns exist
-    for c in EXPECTED_COLS:
-        if c not in edited_df.columns:
-            edited_df[c] = 0.0
+    if "Units" in df_chart.columns:
+        st.subheader("Units Over Time")
+        st.line_chart(df_chart["Units"])
 
-    edited_df = edited_df[EXPECTED_COLS].sort_values("Date")
-    save_history(edited_df)
+    if "Total Performance %" in df_chart.columns:
+        st.subheader("Total Performance % Over Time")
+        st.line_chart(df_chart["Total Performance %"])
 
-    st.success("Saved. Refreshing...")
-    st.rerun()
+    st.subheader("Manual NAV Corrections (Edit Mistakes)")
+
+    st.write("""
+You can use this table to fix mistakes such as:
+- wrong dates (e.g. duplicated 2025-10-26)
+- wrong performance values
+- rows that should not exist
+
+How to use:
+- Click on a cell to edit its value (including the Date).
+- Use the trash icon on the left to delete a row.
+- When finished, click Save edited history below.
+""")
+
+    edited_df = st.data_editor(
+        history_sorted,
+        num_rows="dynamic",
+        key="nav_editor"
+    )
+
+    if st.button("Save edited history"):
+        try:
+            edited_df["Date"] = pd.to_datetime(edited_df["Date"])
+        except Exception:
+            st.error("Could not parse Date column. Please use format YYYY-MM-DD.")
+            st.stop()
+
+        edited_df = edited_df.sort_values("Date")
+        edited_df.to_csv(HISTORY_FILE, index=False)
+
+        st.success("Edited NAV history saved. Reload the page to see the updated table.")
+
